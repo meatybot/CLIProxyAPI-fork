@@ -1,0 +1,152 @@
+name: fork-sync
+
+# Fork-only workflow. Every Sunday it rebases this fork's patches onto the
+# latest upstream release tag, then cuts a matching fork release built from
+# this repository's code.
+#
+# The rebase target is the upstream *release tag*, not upstream main, so a fork
+# tag `vX.Y.Z-fork` contains exactly upstream `vX.Y.Z` plus this fork's patches
+# and the published binaries correspond to a real upstream release.
+
+on:
+  schedule:
+    # Sundays, 06:00 UTC.
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: 'Re-cut the fork release even when the upstream release tag is unchanged'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  # Required for `gh workflow run` to dispatch release.yaml.
+  actions: write
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: router-for-me/CLIProxyAPI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configure git
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Fetch upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --force --tags upstream 'refs/heads/main:refs/remotes/upstream/main'
+
+      - name: Resolve upstream release tag
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          upstream_tag="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)"
+          if [[ -z "$upstream_tag" ]]; then
+            echo "::error::upstream has no published release"
+            exit 1
+          fi
+          if ! git rev-parse -q --verify "refs/tags/${upstream_tag}^{commit}" >/dev/null; then
+            echo "::error::upstream release tag ${upstream_tag} was not fetched"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "refs/tags/${upstream_tag}^{commit}" upstream/main; then
+            echo "::error::upstream release tag ${upstream_tag} is not an ancestor of upstream/main"
+            exit 1
+          fi
+          echo "tag=${upstream_tag}" >> "$GITHUB_OUTPUT"
+          echo "fork_tag=${upstream_tag}-fork" >> "$GITHUB_OUTPUT"
+          echo "Upstream release tag: ${upstream_tag}"
+
+      - name: Mirror upstream tags
+        run: |
+          set -euo pipefail
+          # release.yaml derives its changelog range from
+          # `git describe --tags --abbrev=0 "<fork tag>^"`. Without the upstream
+          # tags present in this repository that lookup fails and the release
+          # notes degrade to the entire history, so keep them mirrored.
+          git push --force --tags origin
+
+      - name: Check whether the fork is already on this release
+        id: state
+        run: |
+          set -euo pipefail
+          fork_tag='${{ steps.upstream.outputs.fork_tag }}'
+          force='${{ inputs.force_release }}'
+          echo "base_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ -n "$(git ls-remote --tags origin "refs/tags/${fork_tag}")" && "$force" != "true" ]]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+            echo "Fork tag ${fork_tag} already exists; nothing to sync."
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase fork patches onto the upstream release tag
+        if: steps.state.outputs.current != 'true'
+        run: |
+          set -euo pipefail
+          upstream_tag='${{ steps.upstream.outputs.tag }}'
+          if ! git rebase "refs/tags/${upstream_tag}"; then
+            git rebase --abort || true
+            echo "::error::rebasing fork patches onto ${upstream_tag} hit conflicts; resolve them manually and re-run"
+            exit 1
+          fi
+          echo "Fork patches now on top of ${upstream_tag}:"
+          git log --oneline "refs/tags/${upstream_tag}..HEAD"
+
+      - name: Verify fork patches survived the rebase
+        if: steps.state.outputs.current != 'true'
+        run: |
+          set -euo pipefail
+          # A rebase silently drops commits that became empty because upstream
+          # adopted an equivalent change. Fail loudly rather than publishing a
+          # "fork" build that no longer carries the patch.
+          if ! grep -q 'ClaudeOAuthScope = "user:inference"' internal/auth/claude/anthropic_auth.go; then
+            echo "::error::the Claude OAuth scope patch is missing after the rebase"
+            exit 1
+          fi
+          if ! grep -q '^## Changes in this fork' README.md; then
+            echo "::error::the README fork section is missing after the rebase"
+            exit 1
+          fi
+
+      - name: Push rebased branch and fork tag
+        if: steps.state.outputs.current != 'true'
+        run: |
+          set -euo pipefail
+          upstream_tag='${{ steps.upstream.outputs.tag }}'
+          fork_tag='${{ steps.upstream.outputs.fork_tag }}'
+          base_sha='${{ steps.state.outputs.base_sha }}'
+          git push --force-with-lease="refs/heads/main:${base_sha}" origin HEAD:main
+          git tag -f -a "$fork_tag" -m "${upstream_tag} plus fork patches"
+          git push --force origin "refs/tags/${fork_tag}"
+
+      - name: Cut the fork release
+        if: steps.state.outputs.current != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          fork_tag='${{ steps.upstream.outputs.fork_tag }}'
+          # A tag pushed with GITHUB_TOKEN does not fire release.yaml's tag-push
+          # trigger; workflow_dispatch is one of the two documented exceptions,
+          # so dispatch release.yaml directly at the fork tag.
+          gh workflow run release.yaml --ref "$fork_tag"
+          echo "Dispatched release.yaml for ${fork_tag}"
