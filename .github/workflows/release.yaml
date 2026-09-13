@@ -16,6 +16,7 @@ permissions:
 
 env:
   GH_REPO: ${{ github.repository }}
+  UPSTREAM_REPO: router-for-me/CLIProxyAPI
   GO_VERSION: '1.26.4'
 
 jobs:
@@ -54,7 +55,18 @@ jobs:
 
           git fetch --force --tags
           previous_tag=""
-          if previous_tag_value="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null)"; then
+          # Fork: a tag is `<upstream tag>-fork` and upstream's tags are not
+          # mirrored here, so the changelog is the fork's own patches, i.e.
+          # everything this tag adds on top of the upstream tag it rebases onto.
+          # Fetch that one upstream ref rather than mirroring 1000+ tags, which
+          # would each run upstream's workflow file at that tag.
+          upstream_tag="${GITHUB_REF_NAME%-fork}"
+          if [[ "$upstream_tag" != "$GITHUB_REF_NAME" ]] &&
+             git fetch --force --no-tags "https://github.com/${UPSTREAM_REPO}.git" \
+               "refs/tags/${upstream_tag}:refs/tags/${upstream_tag}" 2>/dev/null; then
+            previous_tag="$upstream_tag"
+            changelog_range="${previous_tag}..${GITHUB_REF_NAME}"
+          elif previous_tag_value="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null)"; then
             previous_tag="$previous_tag_value"
             changelog_range="${previous_tag}..${GITHUB_REF_NAME}"
           else
