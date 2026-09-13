@@ -8,6 +8,12 @@ name: fork-sync
 # tag `vX.Y.Z-fork` contains exactly upstream `vX.Y.Z` plus this fork's patches
 # and the published binaries correspond to a real upstream release.
 #
+# Upstream tags are deliberately NOT mirrored into this repository: GitHub runs
+# the workflow file *as it exists at the pushed tag*, so pushing upstream tag
+# vX.Y.Z here would run upstream's workflow file from that commit, matching its
+# own `*` / `v*` triggers and cutting a bogus release. Only `*-fork` tags are
+# ever pushed. release.yaml fetches the single upstream tag it needs.
+#
 # Pushes use the FORK_SYNC_SSH_KEY deploy key rather than GITHUB_TOKEN, because
 # GITHUB_TOKEN cannot push a ref that touches .github/workflows/** and cannot
 # trigger release.yaml's tag-push trigger. A deploy-key push does both.
@@ -91,17 +97,6 @@ jobs:
           else
             echo "sync=true" >> "$GITHUB_OUTPUT"
           fi
-
-      - name: Mirror upstream tags
-        if: steps.state.outputs.sync == 'true'
-        run: |
-          set -euo pipefail
-          # release.yaml derives its changelog range from
-          # `git describe --tags --abbrev=0 "<fork tag>^"`, so the upstream tags
-          # have to exist here or the notes degrade to the entire history.
-          # Only `*-fork` tags trigger release.yaml and docker-image.yml, so
-          # mirroring upstream tags publishes nothing.
-          git push --force --tags origin
 
       - name: Rebase fork patches onto the upstream release tag
         if: steps.state.outputs.sync == 'true'
