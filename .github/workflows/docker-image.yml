@@ -2,20 +2,33 @@ name: docker-image
 
 on:
   push:
-    # Fork: this repository mirrors upstream's tags, so match only fork tags.
+    # Fork: only fork tags publish. Upstream tags are never pushed to this
+    # repository, because GitHub runs the workflow file *as it exists at the
+    # pushed tag* -- an upstream tag would run upstream's own `v*` trigger and
+    # its Docker Hub publish, which this fork has no credentials for.
     tags:
       - 'v*-fork'
 
 env:
   APP_NAME: CLIProxyAPI
-  DOCKERHUB_REPO: eceasy/cli-proxy-api
 
 jobs:
-  docker_amd64:
-    runs-on: ubuntu-latest
-    # Fork: no DockerHub credentials are configured, so this publish is skipped
-    # rather than failed. Set DOCKERHUB_USERNAME and DOCKERHUB_TOKEN to enable it.
-    if: vars.PUBLISH_DOCKER == 'true'
+  build:
+    name: build ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,132 +41,78 @@ jobs:
         run: bash .github/scripts/refresh-model-catalogs.sh
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Login to DockerHub
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate Build Metadata
-        run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
-      - name: Build and push (amd64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          build-args: |
-            VERSION=${{ env.VERSION }}
-            COMMIT=${{ env.COMMIT }}
-            BUILD_DATE=${{ env.BUILD_DATE }}
-          tags: |
-            ${{ env.DOCKERHUB_REPO }}:latest-amd64
-            ${{ env.DOCKERHUB_REPO }}:${{ env.VERSION }}-amd64
-
-  docker_arm64:
-    runs-on: ubuntu-24.04-arm
-    if: vars.PUBLISH_DOCKER == 'true'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Refresh models catalog
-        run: bash .github/scripts/refresh-model-catalogs.sh
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Login to DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Generate Build Metadata
-        run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
-      - name: Build and push (arm64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/arm64
-          push: true
-          build-args: |
-            VERSION=${{ env.VERSION }}
-            COMMIT=${{ env.COMMIT }}
-            BUILD_DATE=${{ env.BUILD_DATE }}
-          tags: |
-            ${{ env.DOCKERHUB_REPO }}:latest-arm64
-            ${{ env.DOCKERHUB_REPO }}:${{ env.VERSION }}-arm64
-
-  docker_manifest:
-    runs-on: ubuntu-latest
-    if: vars.PUBLISH_DOCKER == 'true'
-    needs:
-      - docker_amd64
-      - docker_arm64
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Login to DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Generate Build Metadata
-        run: |
-          echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-          echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
-          echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
-      - name: Create and push multi-arch manifests
-        run: |
-          docker buildx imagetools create \
-            --tag "${DOCKERHUB_REPO}:latest" \
-            "${DOCKERHUB_REPO}:latest-amd64" \
-            "${DOCKERHUB_REPO}:latest-arm64"
-          docker buildx imagetools create \
-            --tag "${DOCKERHUB_REPO}:${VERSION}" \
-            "${DOCKERHUB_REPO}:${VERSION}-amd64" \
-            "${DOCKERHUB_REPO}:${VERSION}-arm64"
-      - name: Cleanup temporary tags
-        continue-on-error: true
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
-          namespace="${DOCKERHUB_REPO%%/*}"
-          repo_name="${DOCKERHUB_REPO#*/}"
+          # GHCR rejects uppercase path components; this repository name has them.
+          echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+          echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            COMMIT=${{ env.COMMIT }}
+            BUILD_DATE=${{ env.BUILD_DATE }}
+          # Push by digest and assemble the tags in the manifest job. This
+          # replaces the previous per-arch `-amd64`/`-arm64` tags, so there are
+          # no temporary tags left behind to clean up afterwards.
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
 
-          token="$(
-            curl -fsSL \
-              -H 'Content-Type: application/json' \
-              -d "{\"username\":\"${DOCKERHUB_USERNAME}\",\"password\":\"${DOCKERHUB_TOKEN}\"}" \
-              'https://hub.docker.com/v2/users/login/' \
-              | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])'
-          )"
-
-          delete_tag() {
-            local tag="$1"
-            local url="https://hub.docker.com/v2/repositories/${namespace}/${repo_name}/tags/${tag}/"
-            local http_code
-            http_code="$(curl -sS -o /dev/null -w "%{http_code}" -X DELETE -H "Authorization: JWT ${token}" "${url}" || true)"
-            if [ "${http_code}" = "204" ] || [ "${http_code}" = "404" ]; then
-              echo "Docker Hub tag removed (or missing): ${DOCKERHUB_REPO}:${tag} (HTTP ${http_code})"
-              return 0
-            fi
-            echo "Docker Hub tag delete failed: ${DOCKERHUB_REPO}:${tag} (HTTP ${http_code})"
-            return 0
-          }
-
-          delete_tag "latest-amd64"
-          delete_tag "latest-arm64"
-          delete_tag "${VERSION}-amd64"
-          delete_tag "${VERSION}-arm64"
+  manifest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    needs:
+      - build
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          merge-multiple: true
+          path: /tmp/digests
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create and push multi-arch manifest
+        run: |
+          set -euo pipefail
+          image="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          cd /tmp/digests
+          docker buildx imagetools create \
+            --tag "${image}:${GITHUB_REF_NAME}" \
+            --tag "${image}:latest" \
+            $(printf "${image}@sha256:%s " *)
+          docker buildx imagetools inspect "${image}:${GITHUB_REF_NAME}"
