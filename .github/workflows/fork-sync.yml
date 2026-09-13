@@ -7,6 +7,10 @@ name: fork-sync
 # The rebase target is the upstream *release tag*, not upstream main, so a fork
 # tag `vX.Y.Z-fork` contains exactly upstream `vX.Y.Z` plus this fork's patches
 # and the published binaries correspond to a real upstream release.
+#
+# Pushes use the FORK_SYNC_SSH_KEY deploy key rather than GITHUB_TOKEN, because
+# GITHUB_TOKEN cannot push a ref that touches .github/workflows/** and cannot
+# trigger release.yaml's tag-push trigger. A deploy-key push does both.
 
 on:
   schedule:
@@ -20,9 +24,7 @@ on:
         default: false
 
 permissions:
-  contents: write
-  # Required for `gh workflow run` to dispatch release.yaml.
-  actions: write
+  contents: read
 
 concurrency:
   group: fork-sync
@@ -39,6 +41,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          ssh-key: ${{ secrets.FORK_SYNC_SSH_KEY }}
 
       - name: Configure git
         run: |
@@ -75,16 +78,7 @@ jobs:
           echo "fork_tag=${upstream_tag}-fork" >> "$GITHUB_OUTPUT"
           echo "Upstream release tag: ${upstream_tag}"
 
-      - name: Mirror upstream tags
-        run: |
-          set -euo pipefail
-          # release.yaml derives its changelog range from
-          # `git describe --tags --abbrev=0 "<fork tag>^"`. Without the upstream
-          # tags present in this repository that lookup fails and the release
-          # notes degrade to the entire history, so keep them mirrored.
-          git push --force --tags origin
-
-      - name: Check whether the fork is already on this release
+      - name: Decide whether to sync
         id: state
         run: |
           set -euo pipefail
@@ -92,14 +86,25 @@ jobs:
           force='${{ inputs.force_release }}'
           echo "base_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           if [[ -n "$(git ls-remote --tags origin "refs/tags/${fork_tag}")" && "$force" != "true" ]]; then
-            echo "current=true" >> "$GITHUB_OUTPUT"
+            echo "sync=false" >> "$GITHUB_OUTPUT"
             echo "Fork tag ${fork_tag} already exists; nothing to sync."
           else
-            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "sync=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Mirror upstream tags
+        if: steps.state.outputs.sync == 'true'
+        run: |
+          set -euo pipefail
+          # release.yaml derives its changelog range from
+          # `git describe --tags --abbrev=0 "<fork tag>^"`, so the upstream tags
+          # have to exist here or the notes degrade to the entire history.
+          # Only `*-fork` tags trigger release.yaml and docker-image.yml, so
+          # mirroring upstream tags publishes nothing.
+          git push --force --tags origin
+
       - name: Rebase fork patches onto the upstream release tag
-        if: steps.state.outputs.current != 'true'
+        if: steps.state.outputs.sync == 'true'
         run: |
           set -euo pipefail
           upstream_tag='${{ steps.upstream.outputs.tag }}'
@@ -112,10 +117,10 @@ jobs:
           git log --oneline "refs/tags/${upstream_tag}..HEAD"
 
       - name: Verify fork patches survived the rebase
-        if: steps.state.outputs.current != 'true'
+        if: steps.state.outputs.sync == 'true'
         run: |
           set -euo pipefail
-          # A rebase silently drops commits that became empty because upstream
+          # A rebase silently drops a commit that became empty because upstream
           # adopted an equivalent change. Fail loudly rather than publishing a
           # "fork" build that no longer carries the patch.
           if ! grep -q 'ClaudeOAuthScope = "user:inference"' internal/auth/claude/anthropic_auth.go; then
@@ -127,26 +132,37 @@ jobs:
             exit 1
           fi
 
-      - name: Push rebased branch and fork tag
-        if: steps.state.outputs.current != 'true'
+      - name: Push rebased branch
+        if: steps.state.outputs.sync == 'true'
+        run: |
+          set -euo pipefail
+          base_sha='${{ steps.state.outputs.base_sha }}'
+          git push --force-with-lease="refs/heads/main:${base_sha}" origin HEAD:main
+
+      - name: Push fork tag and cut the release
+        if: steps.state.outputs.sync == 'true'
         run: |
           set -euo pipefail
           upstream_tag='${{ steps.upstream.outputs.tag }}'
           fork_tag='${{ steps.upstream.outputs.fork_tag }}'
-          base_sha='${{ steps.state.outputs.base_sha }}'
-          git push --force-with-lease="refs/heads/main:${base_sha}" origin HEAD:main
+          # Pushed over SSH, so this fires release.yaml's `*-fork` tag trigger.
           git tag -f -a "$fork_tag" -m "${upstream_tag} plus fork patches"
           git push --force origin "refs/tags/${fork_tag}"
 
-      - name: Cut the fork release
-        if: steps.state.outputs.current != 'true'
+      - name: Confirm the release workflow started
+        if: steps.state.outputs.sync == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           fork_tag='${{ steps.upstream.outputs.fork_tag }}'
-          # A tag pushed with GITHUB_TOKEN does not fire release.yaml's tag-push
-          # trigger; workflow_dispatch is one of the two documented exceptions,
-          # so dispatch release.yaml directly at the fork tag.
-          gh workflow run release.yaml --ref "$fork_tag"
-          echo "Dispatched release.yaml for ${fork_tag}"
+          for _ in $(seq 1 20); do
+            count="$(gh run list --workflow release.yaml --branch "$fork_tag" --limit 1 --json databaseId --jq 'length')"
+            if [[ "$count" -gt 0 ]]; then
+              echo "release.yaml is running for ${fork_tag}"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::release.yaml did not start for ${fork_tag}; dispatch it manually"
+          exit 1

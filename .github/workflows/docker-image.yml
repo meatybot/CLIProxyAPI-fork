@@ -2,8 +2,9 @@ name: docker-image
 
 on:
   push:
+    # Fork: this repository mirrors upstream's tags, so match only fork tags.
     tags:
-      - v*
+      - 'v*-fork'
 
 env:
   APP_NAME: CLIProxyAPI
@@ -12,6 +13,9 @@ env:
 jobs:
   docker_amd64:
     runs-on: ubuntu-latest
+    # Fork: no DockerHub credentials are configured, so this publish is skipped
+    # rather than failed. Set DOCKERHUB_USERNAME and DOCKERHUB_TOKEN to enable it.
+    if: vars.PUBLISH_DOCKER == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,6 +54,7 @@ jobs:
 
   docker_arm64:
     runs-on: ubuntu-24.04-arm
+    if: vars.PUBLISH_DOCKER == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -88,6 +93,7 @@ jobs:
 
   docker_manifest:
     runs-on: ubuntu-latest
+    if: vars.PUBLISH_DOCKER == 'true'
     needs:
       - docker_amd64
       - docker_arm64
