@@ -154,13 +154,18 @@ jobs:
         run: |
           set -euo pipefail
           fork_tag='${{ steps.upstream.outputs.fork_tag }}'
+          # Query by head SHA. `gh run list --branch <tag>` returns an empty
+          # list from inside the runner even though the runs exist, so match the
+          # commit the fork tag points at instead.
+          head_sha="$(git rev-parse HEAD)"
           for _ in $(seq 1 20); do
-            run_id="$(gh run list --workflow release.yaml --branch "$fork_tag" --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
-            if [[ -n "$run_id" ]]; then
-              echo "release.yaml is running for ${fork_tag}: $(gh run view "$run_id" --json url --jq .url)"
+            run_url="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${head_sha}" \
+              --jq '[.workflow_runs[] | select(.name == "release" and .event == "push")][0].html_url // empty')"
+            if [[ -n "$run_url" ]]; then
+              echo "release is running for ${fork_tag}: ${run_url}"
               exit 0
             fi
             sleep 15
           done
-          echo "::error::release.yaml did not start for ${fork_tag}; dispatch it manually"
+          echo "::error::release did not start for ${fork_tag} (${head_sha}); dispatch it manually"
           exit 1
