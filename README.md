@@ -43,6 +43,20 @@ You can access the following providers locally and with multiple CLI accounts th
 - Claude OAuth login requests only the `user:inference` scope. Upstream requests `user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload`. The narrowed scope applies to both the authorization URL and the `refresh_token` grant, so a refreshed token never regains the dropped scopes (`ClaudeOAuthScope` in `internal/auth/claude/anthropic_auth.go`).
 - Consequence: the advisory control-plane lookups after login and refresh (`/api/oauth/profile`, `/api/oauth/claude_cli/roles`) now answer 403. They are non-fatal; account identity falls back to the stable credential-derived UUID that already existed for setup tokens, and email / organization metadata stays empty.
 
+### Staying in sync
+
+`.github/workflows/fork-sync.yml` runs every Sunday at 06:00 UTC. It rebases the fork's patches onto the latest upstream *release tag*, verifies the patches survived the rebase, and pushes `vX.Y.Z-fork`, which triggers the release and image builds. It can also be run on demand from the Actions tab; `force_release` re-cuts a release for an unchanged upstream tag. If upstream's changes conflict with a fork patch, the run fails instead of publishing, and the rebase has to be done by hand.
+
+### Releases
+
+Each fork release is built from this repository's code and is tagged `vX.Y.Z-fork`, meaning upstream `vX.Y.Z` plus the patches above. The release notes list only the fork's own commits. Every platform archive upstream publishes is published here, plus a multi-arch image:
+
+```
+docker pull ghcr.io/meatybot/cliproxyapi-fork:latest
+```
+
+Images go to GHCR rather than upstream's Docker Hub repository, authenticated with the built-in `GITHUB_TOKEN`, so the fork needs no registry secrets.
+
 
 ## Sponsor
 

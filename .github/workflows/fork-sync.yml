@@ -31,6 +31,9 @@ on:
 
 permissions:
   contents: read
+  # `gh run list` in the confirmation step needs this; contents alone returns
+  # an empty list and the step reports a release that did start as missing.
+  actions: read
 
 concurrency:
   group: fork-sync
@@ -152,9 +155,9 @@ jobs:
           set -euo pipefail
           fork_tag='${{ steps.upstream.outputs.fork_tag }}'
           for _ in $(seq 1 20); do
-            count="$(gh run list --workflow release.yaml --branch "$fork_tag" --limit 1 --json databaseId --jq 'length')"
-            if [[ "$count" -gt 0 ]]; then
-              echo "release.yaml is running for ${fork_tag}"
+            run_id="$(gh run list --workflow release.yaml --branch "$fork_tag" --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            if [[ -n "$run_id" ]]; then
+              echo "release.yaml is running for ${fork_tag}: $(gh run view "$run_id" --json url --jq .url)"
               exit 0
             fi
             sleep 15
