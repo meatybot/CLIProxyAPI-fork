@@ -5,6 +5,12 @@ on:
     # run only against tags
     tags:
       - '*'
+  # fork-sync pushes its tag with GITHUB_TOKEN, which by design does not fire
+  # the tag-push trigger above. workflow_dispatch is one of the two documented
+  # exceptions, so the fork release is cut by dispatching this workflow at the
+  # fork tag. GITHUB_REF_NAME is the dispatched tag name, which every job below
+  # already uses as the release name and version source.
+  workflow_dispatch:
 
 permissions:
   contents: write
