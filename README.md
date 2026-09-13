@@ -38,6 +38,12 @@ You can access the following providers locally and with multiple CLI accounts th
 </table>
 
 
+## Changes in this fork
+
+- Claude OAuth login requests only the `user:inference` scope. Upstream requests `user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload`. The narrowed scope applies to both the authorization URL and the `refresh_token` grant, so a refreshed token never regains the dropped scopes (`ClaudeOAuthScope` in `internal/auth/claude/anthropic_auth.go`).
+- Consequence: the advisory control-plane lookups after login and refresh (`/api/oauth/profile`, `/api/oauth/claude_cli/roles`) now answer 403. They are non-fatal; account identity falls back to the stable credential-derived UUID that already existed for setup tokens, and email / organization metadata stays empty.
+
+
 ## Sponsor
 
 [![https://www.packyapi.com/register?aff=cliproxyapi](./assets/packycode-en.png)](https://www.packyapi.com/register?aff=cliproxyapi)
