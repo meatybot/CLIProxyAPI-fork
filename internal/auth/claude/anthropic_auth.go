@@ -32,7 +32,12 @@ const (
 	RolesURL         = "https://api.anthropic.com/api/oauth/claude_cli/roles"
 	ClientID         = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	RedirectURI      = "http://localhost:54545/callback"
-	ClaudeOAuthScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+	// ClaudeOAuthScope is requested verbatim by both the authorization URL and the
+	// refresh_token grant, so a token never regains scopes across a refresh.
+	// Narrowed to inference only: the control-plane lookups this drops
+	// (ProfileURL, RolesURL) are advisory and already fall back to a stable
+	// credential-derived identity when they answer 403.
+	ClaudeOAuthScope = "user:inference"
 
 	claudeRefreshMinBackoff       = 5 * time.Second
 	claudeRefreshMaxBackoff       = 5 * time.Minute
